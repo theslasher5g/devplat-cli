@@ -25,7 +25,12 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 15 * time.Second},
+		// POST /environments can legitimately take close to 30s: the
+		// scheduler's own per-host VM-creation attempt against a real
+		// Firecracker host has a 30s timeout, and it may try more than one
+		// candidate host in sequence. 15s here meant the CLI gave up before
+		// the server had a chance to answer even in the healthy case.
+		HTTP: &http.Client{Timeout: 45 * time.Second},
 	}
 }
 
