@@ -11,14 +11,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Palette matches devplat-frontend/src/index.css's dark-mode tokens
+// (--red/--green/--amber/--dark-muted) rather than an arbitrary one, so the
+// CLI reads as the same product as the website.
 var (
-	accent  = lipgloss.Color("#7C6CF0")
-	green   = lipgloss.Color("#57C99A")
-	amber   = lipgloss.Color("#E8B44C")
-	red     = lipgloss.Color("#E8604C")
-	muted   = lipgloss.Color("#7A7A85")
+	accent  = lipgloss.Color("#E63312") // --red
+	green   = lipgloss.Color("#23A26D") // --green
+	amber   = lipgloss.Color("#D99000") // --amber
+	red     = lipgloss.Color("#E63312") // --red
+	muted   = lipgloss.Color("#8A8A82") // --dark-muted
 	dim     = lipgloss.NewStyle().Foreground(muted)
-	bold    = lipgloss.NewStyle().Bold(true)
 	okMark  = lipgloss.NewStyle().Foreground(green).Bold(true)
 	badMark = lipgloss.NewStyle().Foreground(red).Bold(true)
 
@@ -26,9 +28,11 @@ var (
 )
 
 // Banner prints the small header shown once at the start of `devplat connect`.
+// The red bullet mirrors the website's .eyebrow-dot treatment.
 func Banner(version string) {
+	dot := lipgloss.NewStyle().Foreground(accent).Render("●")
 	title := lipgloss.NewStyle().Foreground(accent).Bold(true).Render("devplat")
-	fmt.Printf("%s %s\n", title, dim.Render(version))
+	fmt.Printf("%s %s %s\n", dot, title, dim.Render(version))
 }
 
 // Spinner renders a single status line that overwrites itself in place
@@ -90,27 +94,6 @@ func Line(ok bool, message string) {
 		mark = badMark.Render("✗")
 	}
 	fmt.Printf("%s %s\n", mark, message)
-}
-
-// SessionBox renders the boxed summary shown once the tunnel is up, right
-// before dropping the user into their shell.
-func SessionBox(requestID, dockerHost string) {
-	label := dim.Render
-	rows := lipgloss.JoinVertical(lipgloss.Left,
-		bold.Foreground(green).Render("Connected to devplat"),
-		"",
-		label("environment  ")+requestID,
-		label("DOCKER_HOST  ")+dockerHost,
-	)
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(accent).
-		Padding(0, 2).
-		Render(rows)
-	fmt.Println(box)
-	fmt.Println()
-	fmt.Println(dim.Render("DOCKER_HOST is already set in this shell — run your tests directly.") + " " + dim.Render("Type 'exit' or Ctrl+D to disconnect."))
-	fmt.Println()
 }
 
 // Farewell prints the closing line once the child shell exits and the
