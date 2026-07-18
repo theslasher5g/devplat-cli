@@ -1,21 +1,21 @@
 // devplat is the client CLI described on the marketing site's Download page:
 // a static binary that requests a remote microVM from the control plane,
-// tunnels its Docker API back to a local TCP port, and drops the user into
-// their own shell with DOCKER_HOST already set for whatever test command
-// runs next.
+// tunnels its Docker API back to a local TCP port, and opens a small
+// bordered terminal UI (see internal/tui) where every command runs with
+// DOCKER_HOST already set.
 package main
 
 import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
 	"github.com/theslasher5g/devplat-cli/internal/config"
+	"github.com/theslasher5g/devplat-cli/internal/tui"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
 	"github.com/theslasher5g/devplat-cli/internal/ui"
 )
@@ -46,9 +46,9 @@ func printUsage() {
 
 Usage:
   devplat connect [--token TOKEN] [--api-url URL]
-      Requests a microVM, tunnels it to a local port, and drops you into
-      your own shell with DOCKER_HOST already set. Exit that shell (or
-      Ctrl+D) to disconnect and release the environment.
+      Requests a microVM, tunnels it to a local port, and opens an
+      interactive terminal where DOCKER_HOST is already set. Type 'exit'
+      or press Ctrl+D/Ctrl+C to disconnect and release the environment.
 
   devplat version
       Print the CLI version.
@@ -125,49 +125,38 @@ func runConnect(args []string) {
 		}
 	}()
 
-	// Ctrl+C inside the child shell should behave like it does in any other
-	// shell (interrupt whatever's running in the foreground, not the shell
-	// itself) — but since the child inherits our terminal and process
-	// group, the same SIGINT reaches us too. Drain and ignore it here so it
-	// doesn't kill devplat out from under the shell; SIGTERM (an explicit,
-	// programmatic kill of devplat itself) still tears everything down below.
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt)
+	// SIGTERM (an explicit, programmatic kill of devplat itself — not the
+	// user quitting the TUI, which is handled as a plain keypress inside
+	// it) still needs to release the environment on its way out.
+	termCh := make(chan os.Signal, 1)
+	signal.Notify(termCh, syscall.SIGTERM)
+	programDone := make(chan struct{})
 	go func() {
-		for range sigc {
+		select {
+		case <-termCh:
+			release(client, env.RequestID)
+			os.Exit(0)
+		case <-programDone:
 		}
 	}()
-
-	ui.SessionBox(env.RequestID, dockerHost)
 
 	shellPath := os.Getenv("SHELL")
 	if shellPath == "" {
 		shellPath = "/bin/sh"
 	}
-	shell := exec.Command(shellPath)
-	shell.Env = append(os.Environ(), "DOCKER_HOST="+dockerHost)
-	shell.Stdin = os.Stdin
-	shell.Stdout = os.Stdout
-	shell.Stderr = os.Stderr
-
-	termCh := make(chan os.Signal, 1)
-	signal.Notify(termCh, syscall.SIGTERM)
-	shellDone := make(chan struct{})
-	go func() {
-		select {
-		case <-termCh:
-			if shell.Process != nil {
-				_ = shell.Process.Signal(syscall.SIGTERM)
-			}
-		case <-shellDone:
-		}
-	}()
-
-	_ = shell.Run() // exit status of the user's shell isn't devplat's to report
-	close(shellDone)
+	tuiErr := tui.Run(tui.Session{
+		Version:    version,
+		RequestID:  env.RequestID,
+		DockerHost: dockerHost,
+		ShellPath:  shellPath,
+	})
+	close(programDone)
 
 	listener.Close()
 	release(client, env.RequestID)
+	if tuiErr != nil {
+		fmt.Fprintln(os.Stderr, "devplat: "+tuiErr.Error())
+	}
 	ui.Farewell()
 }
 
