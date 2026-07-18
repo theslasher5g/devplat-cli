@@ -154,7 +154,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			innerWidth = 10
 		}
 		m.input.Width = innerWidth - 2
-		chromeHeight := 8 // header + blank + input row + borders/padding
+		chromeHeight := 9 // header + hairline + blank + input row + borders/padding
 		vpHeight := m.height - chromeHeight
 		if vpHeight < 3 {
 			vpHeight = 3
@@ -243,11 +243,19 @@ func (m model) View() string {
 		statusLine = lipgloss.NewStyle().Foreground(amber).Render("running…")
 	}
 
+	hairline := lipgloss.NewStyle().Foreground(hair).Render(strings.Repeat("─", max(1, m.vp.Width)))
+
+	// A hairline directly under the header — not just a blank line — is what
+	// actually reads as "title separated from body" (Claude Code's terminal
+	// does the same under its own title bar). The blank line still follows
+	// it, so the divider itself stays visually light rather than cramped
+	// against the title text.
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		m.header(),
+		hairline,
 		"",
 		m.vp.View(),
-		lipgloss.NewStyle().Foreground(hair).Render(strings.Repeat("─", max(1, m.vp.Width))),
+		hairline,
 		statusLine,
 	)
 

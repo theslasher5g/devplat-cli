@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
 	"github.com/theslasher5g/devplat-cli/internal/config"
 	"github.com/theslasher5g/devplat-cli/internal/tui"
@@ -23,6 +25,15 @@ import (
 var version = "dev" // set via -ldflags at release build time
 
 func main() {
+	// lipgloss's default color detection reads TERM/COLORTERM and falls back
+	// conservatively (sometimes to no color at all) when a terminal doesn't
+	// advertise truecolor support explicitly, even though almost every
+	// terminal in real use renders 24-bit color fine. We ship one exact
+	// brand red (#E63312), so force the profile instead of trusting that
+	// env-var detection — otherwise the border silently renders uncolored
+	// on terminals that just don't bother setting COLORTERM.
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
