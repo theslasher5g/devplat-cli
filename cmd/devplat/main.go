@@ -1,13 +1,15 @@
 // devplat is the client CLI described on the marketing site's Download page:
 // a static binary that requests a remote microVM from the control plane,
-// tunnels its Docker API back to a local TCP port, and prints the
-// DOCKER_HOST export for whatever test command runs next.
+// tunnels its Docker API back to a local TCP port, and drops the user into
+// their own shell with DOCKER_HOST already set for whatever test command
+// runs next.
 package main
 
 import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
 	"github.com/theslasher5g/devplat-cli/internal/config"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
+	"github.com/theslasher5g/devplat-cli/internal/ui"
 )
 
 var version = "dev" // set via -ldflags at release build time
@@ -43,9 +46,9 @@ func printUsage() {
 
 Usage:
   devplat connect [--token TOKEN] [--api-url URL]
-      Requests a microVM, tunnels it to a local port, and prints the
-      DOCKER_HOST export to use for the rest of the session. Runs until
-      interrupted (Ctrl+C), then releases the environment.
+      Requests a microVM, tunnels it to a local port, and drops you into
+      your own shell with DOCKER_HOST already set. Exit that shell (or
+      Ctrl+D) to disconnect and release the environment.
 
   devplat version
       Print the CLI version.
@@ -80,63 +83,98 @@ func runConnect(args []string) {
 	}
 	client := apiclient.New(cfg.APIURL, cfg.Token)
 
-	fmt.Println("Requesting an environment…")
+	ui.Banner(version)
+
+	spin := ui.NewSpinner()
+	spin.Start("requesting an environment…")
 	env, err := client.RequestEnvironment()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "devplat: "+err.Error())
+		spin.Stop(false, "failed to request an environment")
+		ui.Fatal("%s", err.Error())
 		os.Exit(1)
 	}
-	env, err = awaitAssignment(client, env)
+	env, err = awaitAssignment(client, env, spin)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "devplat: "+err.Error())
+		spin.Stop(false, "environment never became ready")
+		ui.Fatal("%s", err.Error())
 		os.Exit(1)
 	}
-	fmt.Printf("✓ Assigned (request %s)\n", env.RequestID)
+	spin.Stop(true, fmt.Sprintf("assigned (request %s)", env.RequestID))
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "devplat: failed to open a local port: "+err.Error())
+		ui.Fatal("failed to open a local port: %s", err.Error())
 		release(client, env.RequestID)
 		os.Exit(1)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
+	dockerHost := fmt.Sprintf("tcp://127.0.0.1:%d", port)
+	ui.Line(true, "tunnel active")
 
-	fmt.Printf("✓ Tunnel active\n\n")
-	fmt.Printf("  export DOCKER_HOST=tcp://127.0.0.1:%d\n\n", port)
-	fmt.Println("Run your test command in this shell, or eval the line above. Ctrl+C to disconnect.")
-
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigc
-		fmt.Println("\nReleasing environment…")
-		// Release before closing the listener: closing it unblocks the main
-		// goroutine's Accept() loop below, which returns and lets main()
-		// finish — and the whole process exits the instant main() returns,
-		// regardless of what this goroutine is still doing. Releasing first
-		// means the DELETE call is guaranteed to complete before that happens.
-		release(client, env.RequestID)
-		listener.Close()
-		os.Exit(0)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return // listener closed once the child shell exits
+			}
+			go func() {
+				if err := tunnel.Bridge(cfg.APIURL, cfg.Token, env.RequestID, conn); err != nil {
+					fmt.Fprintln(os.Stderr, "devplat: tunnel connection ended: "+err.Error())
+				}
+			}()
+		}
 	}()
 
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return // listener closed (Ctrl+C path above)
+	// Ctrl+C inside the child shell should behave like it does in any other
+	// shell (interrupt whatever's running in the foreground, not the shell
+	// itself) — but since the child inherits our terminal and process
+	// group, the same SIGINT reaches us too. Drain and ignore it here so it
+	// doesn't kill devplat out from under the shell; SIGTERM (an explicit,
+	// programmatic kill of devplat itself) still tears everything down below.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt)
+	go func() {
+		for range sigc {
 		}
-		go func() {
-			if err := tunnel.Bridge(cfg.APIURL, cfg.Token, env.RequestID, conn); err != nil {
-				fmt.Fprintln(os.Stderr, "devplat: tunnel connection ended: "+err.Error())
-			}
-		}()
+	}()
+
+	ui.SessionBox(env.RequestID, dockerHost)
+
+	shellPath := os.Getenv("SHELL")
+	if shellPath == "" {
+		shellPath = "/bin/sh"
 	}
+	shell := exec.Command(shellPath)
+	shell.Env = append(os.Environ(), "DOCKER_HOST="+dockerHost)
+	shell.Stdin = os.Stdin
+	shell.Stdout = os.Stdout
+	shell.Stderr = os.Stderr
+
+	termCh := make(chan os.Signal, 1)
+	signal.Notify(termCh, syscall.SIGTERM)
+	shellDone := make(chan struct{})
+	go func() {
+		select {
+		case <-termCh:
+			if shell.Process != nil {
+				_ = shell.Process.Signal(syscall.SIGTERM)
+			}
+		case <-shellDone:
+		}
+	}()
+
+	_ = shell.Run() // exit status of the user's shell isn't devplat's to report
+	close(shellDone)
+
+	listener.Close()
+	release(client, env.RequestID)
+	ui.Farewell()
 }
 
 // awaitAssignment polls GET /environments/:id until the scheduler has
 // placed the request on a host (or it fails) — POST /environments can
 // return "queued" immediately when the team is at its parallelism limit.
-func awaitAssignment(client *apiclient.Client, env *apiclient.Environment) (*apiclient.Environment, error) {
+func awaitAssignment(client *apiclient.Client, env *apiclient.Environment, spin *ui.Spinner) (*apiclient.Environment, error) {
 	deadline := time.Now().Add(2 * time.Minute)
 	// "assigning" is a brief in-progress claim the scheduler holds while it's
 	// actually booting a VM (see devplat-backend's allocator.ts) — it's not
@@ -148,9 +186,9 @@ func awaitAssignment(client *apiclient.Client, env *apiclient.Environment) (*api
 			return nil, fmt.Errorf("timed out waiting for capacity (request %s is still %s)", env.RequestID, env.Status)
 		}
 		if env.Status == "assigning" {
-			fmt.Println("… assigning a host")
+			spin.Update(ui.Amber("assigning a host…"))
 		} else {
-			fmt.Println("… queued, waiting for capacity")
+			spin.Update(ui.Amber("queued, waiting for capacity…"))
 		}
 		time.Sleep(2 * time.Second)
 		next, err := client.GetEnvironment(env.RequestID)
