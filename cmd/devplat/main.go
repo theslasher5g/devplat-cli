@@ -138,11 +138,20 @@ func runConnect(args []string) {
 // return "queued" immediately when the team is at its parallelism limit.
 func awaitAssignment(client *apiclient.Client, env *apiclient.Environment) (*apiclient.Environment, error) {
 	deadline := time.Now().Add(2 * time.Minute)
-	for env.Status == "queued" {
+	// "assigning" is a brief in-progress claim the scheduler holds while it's
+	// actually booting a VM (see devplat-backend's allocator.ts) — it's not
+	// "queued" and not "failed", so without handling it explicitly here this
+	// loop would exit early and report success before docker_endpoint even
+	// exists.
+	for env.Status == "queued" || env.Status == "assigning" {
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for capacity (request %s is still queued)", env.RequestID)
+			return nil, fmt.Errorf("timed out waiting for capacity (request %s is still %s)", env.RequestID, env.Status)
 		}
-		fmt.Println("… queued, waiting for capacity")
+		if env.Status == "assigning" {
+			fmt.Println("… assigning a host")
+		} else {
+			fmt.Println("… queued, waiting for capacity")
+		}
 		time.Sleep(2 * time.Second)
 		next, err := client.GetEnvironment(env.RequestID)
 		if err != nil {
