@@ -26,13 +26,13 @@ func New(baseURL, token string) *Client {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		// POST /environments can legitimately take a while: the agent's own
-		// boot-readiness wait is up to 20s per host, wrapped in a 40s agent
-		// handler timeout, wrapped in the scheduler's 50s per-host HTTP
+		// boot-readiness wait is up to 45s per host, wrapped in a 60s agent
+		// handler timeout, wrapped in the scheduler's 75s per-host HTTP
 		// timeout — and it may try more than one candidate host in sequence
 		// before giving up or succeeding. Two hosts worst-case approaches
-		// 100s; leave real headroom so the CLI doesn't give up before the
+		// 150s; leave real headroom so the CLI doesn't give up before the
 		// server had a chance to answer even in the healthy case.
-		HTTP: &http.Client{Timeout: 130 * time.Second},
+		HTTP: &http.Client{Timeout: 200 * time.Second},
 	}
 }
 
