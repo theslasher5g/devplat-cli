@@ -77,3 +77,53 @@ v1: token-auth `connect` only. `devplat login` (browser device-code flow +
 OS keychain storage, for interactive local use without a pre-issued token)
 is not yet implemented — token auth via `--token`/`DEVPLAT_TOKEN` covers CI
 and local dev today.
+
+## Distribution
+
+Two platforms published so far, both amd64: Linux and Windows. macOS/arm64
+are a later addition — same pipeline, just more `build` calls in the script
+below, not a rewrite.
+
+**Cutting a release:**
+```bash
+./scripts/build-release.sh v0.4.2
+# -> dist/v0.4.2/{devplat-v0.4.2-linux-amd64.tar.gz,
+#                 devplat-v0.4.2-windows-amd64.zip,
+#                 checksums.txt}
+# -> dist/version.txt (just "v0.4.2")
+```
+
+**Publishing to get.devplat.ch** (a static file server — see
+`deploy/docker-compose.get.yml` + `deploy/nginx.get.conf`, same
+paste-into-the-VPS's-compose-file convention as `devplat-backend`'s and
+`devplat-agent`'s own `deploy/` snippets):
+```bash
+# on the VPS, /opt/devplat/get/public is the volume mount target
+mkdir -p /opt/devplat/get/public/v0.4.2
+cp dist/v0.4.2/* /opt/devplat/get/public/v0.4.2/
+cp dist/version.txt /opt/devplat/get/public/version.txt
+cp install.sh install.ps1 /opt/devplat/get/public/
+
+# first time only: copy deploy/docker-compose.get.yml's `get:` service
+# block into /opt/devplat/docker-compose.yml, and
+# deploy/nginx.get.conf to /opt/devplat/get/nginx.get.conf
+docker compose up -d get
+```
+Old version directories are left in place (immutable, same reasoning as
+the golden image versioning in `devplat-agent`) — nothing currently
+references anything but `version.txt`'s pointer, so nothing breaks by
+keeping them around; delete them manually whenever it's worth reclaiming
+the disk space.
+
+**What users actually run:**
+```bash
+# Linux (also covers CI runners — same script, headless)
+curl -fsSL https://get.devplat.ch | sh
+
+# Windows (PowerShell)
+irm https://get.devplat.ch/install.ps1 | iex
+```
+Both scripts resolve `version.txt`, download the matching archive +
+`checksums.txt`, verify the hash, and install onto `PATH` (`/usr/local/bin`
+on Linux — falls back to `sudo` if that's not writable; `%LOCALAPPDATA%\devplat\bin`
+on Windows, added to the user `PATH`).

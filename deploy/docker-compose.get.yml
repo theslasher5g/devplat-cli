@@ -1,0 +1,37 @@
+# Copy this service block into the existing /opt/devplat/docker-compose.yml
+# (same convention as devplat-backend/deploy/docker-compose.api.yml — one
+# compose file per host, not a separate project). Assumes the `edge` network
+# + Traefik (docker provider, exposedByDefault:false, letsencrypt resolver)
+# already set up there.
+#
+# Serves get.devplat.ch: install.sh / install.ps1 (the "curl | sh" / "irm |
+# iex" entry points) and the versioned release archives + checksums the
+# Download page links to. Static files only, so plain nginx is enough — no
+# application code and nothing here talks to the rest of the stack.
+#
+# Layout expected under ./get/public (relative to this compose file):
+#   install.sh
+#   install.ps1
+#   version.txt              <- current version tag, e.g. "v0.4.2"
+#   v0.4.2/
+#     devplat-v0.4.2-linux-amd64.tar.gz
+#     devplat-v0.4.2-windows-amd64.zip
+#     checksums.txt
+# Produced by devplat-cli/scripts/build-release.sh — see that repo's
+# README's Distribution section for the publish step.
+
+services:
+  get:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./get/public:/usr/share/nginx/html:ro
+      - ./get/nginx.get.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.get.rule=Host(`get.devplat.ch`)
+      - traefik.http.routers.get.entrypoints=websecure
+      - traefik.http.routers.get.tls.certresolver=letsencrypt
+      - traefik.http.services.get.loadbalancer.server.port=80
