@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -22,7 +23,20 @@ import (
 // until the connection ends; callers run it in its own goroutine per
 // accepted local connection.
 func Bridge(apiURL, token, requestID string, local io.ReadWriteCloser) error {
-	wsURL, err := toWebsocketURL(apiURL, requestID)
+	return bridge(apiURL, token, requestID, 0, local)
+}
+
+// BridgePort is Bridge for one container port published inside the remote
+// VM, connecting to {apiURL}/environments/{requestID}/tunnel/{port} instead
+// of the Docker API tunnel. Used by internal/portwatch: one bridge per
+// accepted local connection on a mirrored port, exactly like Bridge is one
+// per local Docker API connection.
+func BridgePort(apiURL, token, requestID string, port int, local io.ReadWriteCloser) error {
+	return bridge(apiURL, token, requestID, port, local)
+}
+
+func bridge(apiURL, token, requestID string, port int, local io.ReadWriteCloser) error {
+	wsURL, err := toWebsocketURL(apiURL, requestID, port)
 	if err != nil {
 		return err
 	}
@@ -79,7 +93,9 @@ func Bridge(apiURL, token, requestID string, local io.ReadWriteCloser) error {
 	return err
 }
 
-func toWebsocketURL(apiURL, requestID string) (string, error) {
+// toWebsocketURL builds the tunnel URL; port 0 means the Docker API tunnel,
+// any other port the per-container-port tunnel.
+func toWebsocketURL(apiURL, requestID string, port int) (string, error) {
 	u, err := url.Parse(apiURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid API URL %q: %w", apiURL, err)
@@ -93,5 +109,8 @@ func toWebsocketURL(apiURL, requestID string) (string, error) {
 		return "", fmt.Errorf("unsupported API URL scheme %q", u.Scheme)
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/environments/" + requestID + "/tunnel"
+	if port != 0 {
+		u.Path += "/" + strconv.Itoa(port)
+	}
 	return u.String(), nil
 }

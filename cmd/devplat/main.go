@@ -17,6 +17,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
 	"github.com/theslasher5g/devplat-cli/internal/config"
+	"github.com/theslasher5g/devplat-cli/internal/portwatch"
 	"github.com/theslasher5g/devplat-cli/internal/tui"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
 	"github.com/theslasher5g/devplat-cli/internal/ui"
@@ -122,6 +123,13 @@ func runConnect(args []string) {
 	dockerHost := fmt.Sprintf("tcp://127.0.0.1:%d", port)
 	ui.Line(true, "tunnel active")
 
+	// Mirror container ports the VM's Docker publishes onto the same local
+	// ports, so Testcontainers' mapped-port connections (which resolve the
+	// docker host to 127.0.0.1) actually land somewhere — see
+	// internal/portwatch.
+	watcher := portwatch.New(cfg.APIURL, cfg.Token, env.RequestID, fmt.Sprintf("127.0.0.1:%d", port))
+	watcher.Start()
+
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -163,6 +171,7 @@ func runConnect(args []string) {
 	})
 	close(programDone)
 
+	watcher.Stop()
 	listener.Close()
 	release(client, env.RequestID)
 	if tuiErr != nil {
