@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
 	"github.com/theslasher5g/devplat-cli/internal/config"
+	"github.com/theslasher5g/devplat-cli/internal/credentials"
 	"github.com/theslasher5g/devplat-cli/internal/portwatch"
 	"github.com/theslasher5g/devplat-cli/internal/tui"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
@@ -42,6 +46,10 @@ func main() {
 	switch os.Args[1] {
 	case "connect":
 		runConnect(os.Args[2:])
+	case "login":
+		runLogin(os.Args[2:])
+	case "logout":
+		runLogout(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("devplat " + version)
 	case "help", "--help", "-h":
@@ -57,6 +65,15 @@ func printUsage() {
 	fmt.Println(`devplat — remote Testcontainers backend client
 
 Usage:
+  devplat login [--token TOKEN] [--api-url URL]
+      Sign in so 'devplat connect' works without a token each time. With no
+      flags, opens a browser sign-in (device flow) and stores the resulting
+      token. With --token, stores a token you already created in the
+      dashboard. Saved to your user config dir.
+
+  devplat logout
+      Revoke the stored token and remove it from this machine.
+
   devplat connect [--token TOKEN] [--api-url URL]
       Requests a microVM, tunnels it to a local port, and opens an
       interactive terminal where DOCKER_HOST is already set. Type 'exit'
@@ -66,31 +83,175 @@ Usage:
       Print the CLI version.
 
 Token resolution: --token flag, then the DEVPLAT_TOKEN environment
-variable. Create a scoped token (ci:run) in the dashboard under
-Tokens. Control-plane URL defaults to https://api.devplat.ch, override
-with --api-url or DEVPLAT_API_URL (mainly for local development).`)
+variable, then the token saved by 'devplat login'. Control-plane URL
+defaults to https://api.devplat.ch, override with --api-url or
+DEVPLAT_API_URL (mainly for local development).`)
 }
 
-func runConnect(args []string) {
-	var tokenFlag, apiURLFlag string
+// parseConnFlags pulls --token/--api-url out of an arg slice, shared by
+// connect/login/logout.
+func parseConnFlags(args []string) (token, apiURL string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--token":
-			i++
-			if i < len(args) {
-				tokenFlag = args[i]
+			if i++; i < len(args) {
+				token = args[i]
 			}
 		case "--api-url":
-			i++
-			if i < len(args) {
-				apiURLFlag = args[i]
+			if i++; i < len(args) {
+				apiURL = args[i]
 			}
 		}
 	}
+	return token, apiURL
+}
+
+func runLogin(args []string) {
+	tokenFlag, apiURLFlag := parseConnFlags(args)
+
+	// Resolve the control-plane URL the same way connect does, but WITHOUT the
+	// stored token feeding back in (we're about to write it): flag, env, then
+	// default. The api-url is what gets saved alongside the token.
+	apiURL := apiURLFlag
+	if apiURL == "" {
+		apiURL = os.Getenv("DEVPLAT_API_URL")
+	}
+	if apiURL == "" {
+		apiURL = config.DefaultAPIURL
+	}
+
+	ui.Banner(version)
+
+	// --token: store a token the user already created in the dashboard. The
+	// cheap path — no browser, no polling.
+	if tokenFlag != "" {
+		if !strings.HasPrefix(tokenFlag, "dvp_") {
+			ui.Fatal("that doesn't look like a devplat token (expected a dvp_… value)")
+			os.Exit(1)
+		}
+		if err := credentials.Save(credentials.Credentials{Token: tokenFlag, APIURL: apiURL}); err != nil {
+			ui.Fatal("could not save credentials: %s", err.Error())
+			os.Exit(1)
+		}
+		ui.Line(true, "token saved to "+credentials.Path())
+		ui.Note("You can now run 'devplat connect' without --token.")
+		return
+	}
+
+	// Device flow: start a request, show the code, poll until approved.
+	client := apiclient.New(apiURL, "")
+	da, err := client.StartDeviceAuth()
+	if err != nil {
+		ui.Fatal("could not start login: %s", err.Error())
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	ui.Note("To sign in, open this URL in your browser:")
+	fmt.Println("  " + ui.Highlight(da.VerificationURI))
+	ui.Note("and enter the code:")
+	fmt.Println("  " + ui.Highlight(da.UserCode))
+	fmt.Println()
+	if openBrowser(da.VerificationURIComplete) {
+		ui.Note("(opened your browser automatically — approve there, or use the URL above)")
+	}
+
+	spin := ui.NewSpinner()
+	spin.Start("waiting for you to authorize in the browser…")
+
+	interval := time.Duration(da.Interval) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	deadline := time.Now().Add(time.Duration(da.ExpiresIn) * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			spin.Stop(false, "login timed out — run 'devplat login' again")
+			os.Exit(1)
+		}
+		time.Sleep(interval)
+		res, err := client.PollDeviceToken(da.DeviceCode)
+		if err != nil {
+			// Terminal server states end the loop; anything else (a transient
+			// network blip) is retried until the deadline.
+			switch err.Error() {
+			case "expired_token":
+				spin.Stop(false, "login expired — run 'devplat login' again")
+				os.Exit(1)
+			case "invalid_device_code", "already_completed":
+				spin.Stop(false, "login could not be completed — run 'devplat login' again")
+				os.Exit(1)
+			}
+			continue
+		}
+		switch res.Status {
+		case "pending":
+			continue
+		case "denied":
+			spin.Stop(false, "login was denied in the browser")
+			os.Exit(1)
+		case "complete":
+			// Store the URL the CLI actually reached the server on — that's
+			// definitionally the working endpoint for future `connect` calls.
+			// The server also reports its own canonical apiUrl, but trusting it
+			// would store the production default for a dev/self-hosted backend
+			// that never set API_URL, breaking later connects.
+			if err := credentials.Save(credentials.Credentials{Token: res.Token, APIURL: apiURL}); err != nil {
+				spin.Stop(false, "authorized, but could not save credentials")
+				ui.Fatal("%s", err.Error())
+				os.Exit(1)
+			}
+			spin.Stop(true, "logged in — token saved to "+credentials.Path())
+			ui.Note("You can now run 'devplat connect'.")
+			return
+		}
+	}
+}
+
+func runLogout(args []string) {
+	stored, _ := credentials.Load()
+	if stored == nil || stored.Token == "" {
+		ui.Line(true, "not logged in — nothing to do")
+		return
+	}
+	// Best-effort server-side revoke so the token can't be reused, then remove
+	// it locally regardless of whether the revoke call reached the server.
+	apiURL := stored.APIURL
+	if apiURL == "" {
+		apiURL = config.DefaultAPIURL
+	}
+	if err := apiclient.New(apiURL, stored.Token).RevokeToken(); err != nil {
+		ui.Note("(could not reach the server to revoke the token: %s — removing it locally anyway)", err.Error())
+	}
+	if err := credentials.Delete(); err != nil {
+		ui.Fatal("could not remove stored credentials: %s", err.Error())
+		os.Exit(1)
+	}
+	ui.Line(true, "logged out — token revoked and removed")
+}
+
+// openBrowser tries to open url in the user's default browser, returning
+// whether the launch command started. Best-effort: on a headless/CI box there
+// may be no browser, in which case the printed URL + code is the fallback.
+func openBrowser(url string) bool {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start() == nil
+}
+
+func runConnect(args []string) {
+	tokenFlag, apiURLFlag := parseConnFlags(args)
 
 	cfg := config.Resolve(tokenFlag, apiURLFlag)
 	if cfg.Token == "" {
-		fmt.Fprintln(os.Stderr, "devplat: no API token — pass --token or set DEVPLAT_TOKEN")
+		fmt.Fprintln(os.Stderr, "devplat: no API token — run 'devplat login', pass --token, or set DEVPLAT_TOKEN")
 		os.Exit(1)
 	}
 	client := apiclient.New(cfg.APIURL, cfg.Token)

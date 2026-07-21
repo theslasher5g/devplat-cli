@@ -115,3 +115,88 @@ func (c *Client) GetEnvironment(id string) (*Environment, error) {
 func (c *Client) ReleaseEnvironment(id string) error {
 	return c.do(http.MethodDelete, "/environments/"+id, nil, nil)
 }
+
+// RevokeToken invalidates the token this client authenticates with, server-
+// side (DELETE /auth/token). Used by `devplat logout` so a logged-out machine
+// can't keep starting environments. Idempotent on the server.
+func (c *Client) RevokeToken() error {
+	return c.do(http.MethodDelete, "/auth/token", nil, nil)
+}
+
+// --- Device-authorization flow (`devplat login`) ---
+//
+// These two endpoints are unauthenticated (there's no token yet — that's the
+// whole point), so they bypass c.do's Bearer header via doNoAuth.
+
+// DeviceAuth is the response to POST /auth/device/start.
+type DeviceAuth struct {
+	DeviceCode              string `json:"deviceCode"`
+	UserCode                string `json:"userCode"`
+	VerificationURI         string `json:"verificationUri"`
+	VerificationURIComplete string `json:"verificationUriComplete"`
+	ExpiresIn               int    `json:"expiresIn"`
+	Interval                int    `json:"interval"`
+}
+
+// DeviceToken is the response to POST /auth/device/token. Status is one of
+// "pending", "denied", or "complete"; Token/APIURL are set only when complete.
+type DeviceToken struct {
+	Status string `json:"status"`
+	Token  string `json:"token"`
+	APIURL string `json:"apiUrl"`
+}
+
+func (c *Client) StartDeviceAuth() (*DeviceAuth, error) {
+	var out DeviceAuth
+	if err := c.doNoAuth(http.MethodPost, "/auth/device/start", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PollDeviceToken makes one poll. A "pending" status is returned as a normal
+// result (not an error), so the caller can keep polling; transport/HTTP errors
+// are returned as errors.
+func (c *Client) PollDeviceToken(deviceCode string) (*DeviceToken, error) {
+	var out DeviceToken
+	if err := c.doNoAuth(http.MethodPost, "/auth/device/token", map[string]string{"deviceCode": deviceCode}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// doNoAuth is c.do without the Authorization header, for the pre-login
+// device-flow endpoints. Kept separate rather than conditionally omitting the
+// header in do() so the authenticated path stays obviously always-authed.
+func (c *Client) doNoAuth(method, path string, body any, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(method, c.BaseURL+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("request to %s failed: %w", path, err)
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode >= 300 {
+		var apiErr apiError
+		_ = json.Unmarshal(raw, &apiErr)
+		if apiErr.Error != "" {
+			return fmt.Errorf("%s", apiErr.Error)
+		}
+		return fmt.Errorf("%s: unexpected status %d", path, res.StatusCode)
+	}
+	if out != nil && len(raw) > 0 {
+		return json.Unmarshal(raw, out)
+	}
+	return nil
+}

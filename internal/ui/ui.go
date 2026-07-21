@@ -113,3 +113,15 @@ var amberStyle = lipgloss.NewStyle().Foreground(amber)
 
 // Amber renders a warning-toned line (used for the queued/assigning wait).
 func Amber(message string) string { return amberStyle.Render(message) }
+
+// Note prints a dimmed informational line (used by `devplat login` for the
+// instructions around the verification code).
+func Note(format string, args ...any) {
+	fmt.Println(dim.Render(fmt.Sprintf(format, args...)))
+}
+
+// Highlight renders text in the brand accent for inline emphasis — e.g. the
+// login code and verification URL the user needs to act on.
+func Highlight(s string) string {
+	return lipgloss.NewStyle().Foreground(accent).Bold(true).Render(s)
+}
