@@ -47,6 +47,7 @@ type Watcher struct {
 	wg     sync.WaitGroup
 
 	mu        sync.Mutex
+	stopped   bool // set by Stop under mu; stops reconcile opening new listeners
 	listeners map[int]net.Listener
 	warned    map[int]bool // ports we already logged a listen failure for
 }
@@ -99,14 +100,25 @@ func (w *Watcher) Start() {
 }
 
 func (w *Watcher) Stop() {
+	// Order matters: the acceptLoop goroutines are parked in l.Accept() and
+	// only return once their listener is closed, so the listeners MUST be
+	// closed before wg.Wait() — waiting first would deadlock (Wait blocks on
+	// goroutines that are themselves waiting for the close that only happens
+	// after Wait). close(w.stop) stops the poller; closing every listener
+	// unblocks every acceptLoop; then Wait drains them all.
 	close(w.stop)
-	w.wg.Wait()
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	// Mark stopped BEFORE releasing the lock: a reconcile() blocked on w.mu
+	// right now would otherwise resume after this and open a fresh listener
+	// we've already passed in the close loop, leaving an acceptLoop that
+	// wg.Wait() would then block on forever.
+	w.stopped = true
 	for port, l := range w.listeners {
 		_ = l.Close()
 		delete(w.listeners, port)
 	}
+	w.mu.Unlock()
+	w.wg.Wait()
 }
 
 // containerSummary is the slice of GET /containers/json we care about.
@@ -155,6 +167,14 @@ func (w *Watcher) reconcile() {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	// Stop() may have run while publishedPorts() was in flight (it doesn't
+	// hold w.mu). If so, don't open new listeners — Stop already closed the
+	// existing ones and is (or soon will be) in wg.Wait(); a new acceptLoop
+	// here would be a goroutine it blocks on forever.
+	if w.stopped {
+		return
+	}
 
 	for port, l := range w.listeners {
 		if !wanted[port] {
