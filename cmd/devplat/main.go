@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -74,10 +75,13 @@ Usage:
   devplat logout
       Revoke the stored token and remove it from this machine.
 
-  devplat connect [--token TOKEN] [--api-url URL]
-      Requests a microVM, tunnels it to a local port, and opens an
-      interactive terminal where DOCKER_HOST is already set. Type 'exit'
-      or press Ctrl+D/Ctrl+C to disconnect and release the environment.
+  devplat connect [--token TOKEN] [--api-url URL] [--exec "CMD"]
+      Requests a microVM and tunnels it to a local port with DOCKER_HOST set.
+      Without --exec, opens an interactive terminal (type 'exit' or press
+      Ctrl+D/Ctrl+C to disconnect). With --exec, runs CMD headless — for CI:
+      the command inherits DOCKER_HOST, its exit code becomes devplat's, and
+      the environment is released when it finishes. Either way the
+      environment is torn down on exit.
 
   devplat version
       Print the CLI version.
@@ -88,9 +92,9 @@ defaults to https://api.devplat.ch, override with --api-url or
 DEVPLAT_API_URL (mainly for local development).`)
 }
 
-// parseConnFlags pulls --token/--api-url out of an arg slice, shared by
-// connect/login/logout.
-func parseConnFlags(args []string) (token, apiURL string) {
+// parseConnFlags pulls --token/--api-url/--exec out of an arg slice, shared by
+// connect/login/logout. login/logout ignore execCmd (they have no --exec).
+func parseConnFlags(args []string) (token, apiURL, execCmd string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--token":
@@ -101,13 +105,17 @@ func parseConnFlags(args []string) (token, apiURL string) {
 			if i++; i < len(args) {
 				apiURL = args[i]
 			}
+		case "--exec":
+			if i++; i < len(args) {
+				execCmd = args[i]
+			}
 		}
 	}
-	return token, apiURL
+	return token, apiURL, execCmd
 }
 
 func runLogin(args []string) {
-	tokenFlag, apiURLFlag := parseConnFlags(args)
+	tokenFlag, apiURLFlag, _ := parseConnFlags(args)
 
 	// Resolve the control-plane URL the same way connect does, but WITHOUT the
 	// stored token feeding back in (we're about to write it): flag, env, then
@@ -247,7 +255,7 @@ func openBrowser(url string) bool {
 }
 
 func runConnect(args []string) {
-	tokenFlag, apiURLFlag := parseConnFlags(args)
+	tokenFlag, apiURLFlag, execCmd := parseConnFlags(args)
 
 	cfg := config.Resolve(tokenFlag, apiURLFlag)
 	if cfg.Token == "" {
@@ -295,7 +303,7 @@ func runConnect(args []string) {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				return // listener closed once the child shell exits
+				return // listener closed once the session ends
 			}
 			go func() {
 				if err := tunnel.Bridge(cfg.APIURL, cfg.Token, env.RequestID, conn); err != nil {
@@ -304,6 +312,25 @@ func runConnect(args []string) {
 			}()
 		}
 	}()
+
+	shellPath := os.Getenv("SHELL")
+	if shellPath == "" {
+		shellPath = "/bin/sh"
+	}
+
+	// --exec: headless mode for CI. Instead of the interactive TUI, run one
+	// command with DOCKER_HOST set, propagate its exit code, and release the
+	// environment on the way out. This is what makes the documented CI
+	// workflow real — a backgrounded interactive `connect` never handed the
+	// caller's shell a DOCKER_HOST.
+	if execCmd != "" {
+		ui.Line(true, "running: "+execCmd)
+		code := runExecCommand(execCmd, shellPath, dockerHost)
+		watcher.Stop()
+		listener.Close()
+		release(client, env.RequestID)
+		os.Exit(code)
+	}
 
 	// SIGTERM (an explicit, programmatic kill of devplat itself — not the
 	// user quitting the TUI, which is handled as a plain keypress inside
@@ -320,10 +347,6 @@ func runConnect(args []string) {
 		}
 	}()
 
-	shellPath := os.Getenv("SHELL")
-	if shellPath == "" {
-		shellPath = "/bin/sh"
-	}
 	tuiErr := tui.Run(tui.Session{
 		Version:    version,
 		RequestID:  env.RequestID,
@@ -339,6 +362,43 @@ func runConnect(args []string) {
 		fmt.Fprintln(os.Stderr, "devplat: "+tuiErr.Error())
 	}
 	ui.Farewell()
+}
+
+// runExecCommand runs one command with DOCKER_HOST set (headless --exec mode),
+// wiring the child's stdio straight through so its output and exit code are
+// the CLI's own. Interrupt/terminate signals are forwarded to the child so it
+// can abort cleanly; the caller releases the environment after this returns
+// regardless of how the command ended.
+func runExecCommand(cmdline, shellPath, dockerHost string) int {
+	c := exec.Command(shellPath, "-c", cmdline)
+	c.Env = append(os.Environ(), "DOCKER_HOST="+dockerHost)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Start(); err != nil {
+		ui.Fatal("failed to start command: %s", err.Error())
+		return 1
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		for s := range sigCh {
+			if c.Process != nil {
+				_ = c.Process.Signal(s)
+			}
+		}
+	}()
+
+	err := c.Wait()
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	ui.Fatal("command error: %s", err.Error())
+	return 1
 }
 
 // awaitAssignment polls GET /environments/:id until the scheduler has
