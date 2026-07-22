@@ -87,7 +87,13 @@ func bridge(apiURL, token, requestID string, port int, local io.ReadWriteCloser)
 
 	err = <-errc
 	local.Close()
-	if err == io.EOF || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+	// CloseNoStatusReceived (1005): RFC 6455's code for "the peer closed
+	// without sending a status" — exactly what a bare, argument-less
+	// WebSocket .close() on the relay's side produces. For this raw byte
+	// pipe (no higher-level protocol negotiating close reasons) that's just
+	// as much a normal end-of-connection as 1000/1001, so it's tolerated the
+	// same way rather than logged as a tunnel error.
+	if err == io.EOF || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
 		return nil
 	}
 	return err
