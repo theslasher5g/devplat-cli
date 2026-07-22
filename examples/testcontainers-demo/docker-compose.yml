@@ -1,0 +1,33 @@
+# Sample project for exercising every `devplat connect` TUI feature end to
+# end against a real remote environment. Run `devplat connect` from this
+# directory (not `docker compose up` on its own — the whole point is that
+# these containers run on the remote VM, reached through the CLI's tunnel),
+# then drive the commands in examples/testcontainers-demo/README.md.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: devplat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Intentional bind mount, on purpose: this is the classic remote-Docker
+  # footgun devplat's TUI warns about (#8). `./demo-logs` resolves on the
+  # REMOTE VM where dockerd runs, not on your laptop — the warning should
+  # fire once you `devplat connect` in this directory.
+  heartbeat:
+    image: busybox
+    command: ["sh", "-c", "while true; do date >> /var/log/demo/heartbeat.log; sleep 5; done"]
+    volumes:
+      - ./demo-logs:/var/log/demo
+
+volumes:
+  pgdata:
