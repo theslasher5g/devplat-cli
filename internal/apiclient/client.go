@@ -37,12 +37,32 @@ func New(baseURL, token string) *Client {
 }
 
 // Environment mirrors the fields the CLI actually needs from a
-// GET/POST /environments(/:id) response.
+// GET/POST /environments(/:id) response. The richer fields (vcpu/ram/ttl/
+// region/usage) are only populated by GET /environments/:id, not POST.
 type Environment struct {
 	RequestID      string `json:"requestId"`
 	Status         string `json:"status"` // "queued" | "assigned" | "failed" | "released"
 	DockerEndpoint string `json:"dockerEndpoint"`
 	Error          string `json:"error"`
+
+	Vcpu       int64  `json:"vcpu"`
+	RamMb      int64  `json:"ramMb"`
+	Region     string `json:"region"`
+	HostName   string `json:"hostName"`
+	ExpiresAt  string `json:"expiresAt"` // RFC3339, or "" before assignment
+	TTLMinutes int    `json:"ttlMinutes"`
+	Usage      struct {
+		Running int `json:"running"`
+		Limit   int `json:"limit"`
+	} `json:"usage"`
+}
+
+// PlatformStatus is the slice of GET /status the TUI header shows.
+type PlatformStatus struct {
+	Overall struct {
+		Status string `json:"status"`
+		Label  string `json:"label"`
+	} `json:"overall"`
 }
 
 type apiError struct {
@@ -114,6 +134,16 @@ func (c *Client) GetEnvironment(id string) (*Environment, error) {
 
 func (c *Client) ReleaseEnvironment(id string) error {
 	return c.do(http.MethodDelete, "/environments/"+id, nil, nil)
+}
+
+// PlatformStatus fetches the public status summary for the TUI header. Returns
+// a zero value (and no error) treated by callers as "unknown" on failure.
+func (c *Client) PlatformStatus() (*PlatformStatus, error) {
+	var s PlatformStatus
+	if err := c.do(http.MethodGet, "/status", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 // RevokeToken invalidates the token this client authenticates with, server-

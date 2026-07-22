@@ -20,6 +20,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/theslasher5g/devplat-cli/internal/apiclient"
+	"github.com/theslasher5g/devplat-cli/internal/commands"
+	"github.com/theslasher5g/devplat-cli/internal/compose"
 	"github.com/theslasher5g/devplat-cli/internal/config"
 	"github.com/theslasher5g/devplat-cli/internal/credentials"
 	"github.com/theslasher5g/devplat-cli/internal/portwatch"
@@ -347,11 +349,20 @@ func runConnect(args []string) {
 		}
 	}()
 
+	// Project context for the TUI: cwd drives per-project command history and
+	// the docker-compose bind-mount warning.
+	projectDir, _ := os.Getwd()
+	bindMounts, _ := compose.Detect(projectDir)
 	tuiErr := tui.Run(tui.Session{
 		Version:    version,
 		RequestID:  env.RequestID,
 		DockerHost: dockerHost,
+		DockerAddr: fmt.Sprintf("127.0.0.1:%d", port),
 		ShellPath:  shellPath,
+		ProjectDir: projectDir,
+		Client:     client,
+		Commands:   commands.Load(),
+		BindMounts: bindMounts,
 	})
 	close(programDone)
 
