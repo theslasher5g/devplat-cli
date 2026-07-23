@@ -25,7 +25,7 @@ func newTestModel(t *testing.T) model {
 		Commands: commands.Load(),
 		BindMounts: []compose.BindMount{{Service: "db", Source: "./data", Target: "/var/lib/postgresql"}},
 	}
-	m := model{sess: sess, vp: viewport.New(80, 20), input: ti, lines: welcomeLines(sess)}
+	m := model{sess: sess, vp: viewport.New(80, 20), input: ti, lines: welcomeLines(sess), histIdx: -1}
 	return m
 }
 
@@ -74,10 +74,10 @@ func TestKeys_NoPanic(t *testing.T) {
 	m = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step(t, m, containersMsg{list: []dockerapi.Container{{Name: "pg", State: "running", Ports: []dockerapi.Port{{Public: 5432}}}}})
 
-	// Tab into the sidebar, navigate, request logs (returns a cmd).
-	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	// Shift+Tab switches into the sidebar, navigate, request logs (returns a cmd).
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.focus != focusSidebar {
-		t.Fatal("Tab should focus the sidebar")
+		t.Fatal("Shift+Tab should focus the sidebar")
 	}
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
@@ -85,10 +85,35 @@ func TestKeys_NoPanic(t *testing.T) {
 	if cmd == nil {
 		t.Error("^l on a selected container should produce a fetch command")
 	}
+	if !m.logsFollow {
+		t.Error("^l should start following logs")
+	}
+
+	// Back to the input.
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.focus != focusInput {
+		t.Fatal("Shift+Tab should return focus to the input")
+	}
+
+	// Up-arrow recalls the last command; Down-arrow restores the draft.
+	m.sess.Commands.AddHistory(m.sess.ProjectDir, "mvn verify")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.input.Value() != "mvn verify" {
+		t.Errorf("Up should recall last command, got %q", m.input.Value())
+	}
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.input.Value() != "" {
+		t.Errorf("Down should restore the empty draft, got %q", m.input.Value())
+	}
+
+	// Tab autocompletes from a prefix (history contains "mvn verify").
+	m.input.SetValue("mvn ")
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.input.Value() != "mvn verify" {
+		t.Errorf("Tab should complete 'mvn ' to a candidate, got %q", m.input.Value())
+	}
 
 	// Command picker with history present.
-	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab}) // back to input
-	m.sess.Commands.AddHistory(m.sess.ProjectDir, "mvn verify")
 	m = step(t, m, tea.KeyMsg{Type: tea.KeyCtrlR})
 	if m.overlay != overlayPicker {
 		t.Fatal("^r should open the picker when history exists")

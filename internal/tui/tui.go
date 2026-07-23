@@ -132,8 +132,21 @@ type model struct {
 	pickerIdx   int
 	pickerSaved map[string]bool
 
-	// logs overlay state
-	logsBody string
+	// command-history navigation in the input (↑/↓). histIdx == -1 means
+	// "editing the live input"; 0.. indexes into History (most-recent first).
+	histIdx   int
+	histDraft string
+	// tab-completion cycle: acMatches is the candidate set built on the first
+	// Tab from the then-current prefix; repeated Tab advances acIdx through it.
+	acMatches []string
+	acIdx     int
+
+	// logs overlay state. logsID/logsFollow drive tail-follow: while the logs
+	// overlay is open the tick loop re-fetches this container's logs so they
+	// stream in like `docker logs -f`.
+	logsBody   string
+	logsID     string
+	logsFollow bool
 
 	running  bool
 	quitting bool
@@ -152,10 +165,11 @@ func Run(sess Session) error {
 	ti.Cursor.Style = greenStyle
 
 	m := model{
-		sess:  sess,
-		vp:    viewport.New(80, 20),
-		input: ti,
-		lines: welcomeLines(sess),
+		sess:    sess,
+		vp:      viewport.New(80, 20),
+		input:   ti,
+		lines:   welcomeLines(sess),
+		histIdx: -1,
 	}
 	m.syncViewport()
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -166,7 +180,7 @@ func Run(sess Session) error {
 func welcomeLines(sess Session) []string {
 	out := []string{
 		dimStyle.Render("Connected. DOCKER_HOST is set for every command you run here."),
-		dimStyle.Render("Tab: containers · ^l logs · ^y copy port · ^r commands · ^s save · exit to quit."),
+		dimStyle.Render("↑ history · Tab complete · ⇧Tab panes · ^l logs · ^y copy port · ^r commands · ^s save · exit to quit."),
 		"",
 	}
 	// #8: one-time docker-compose bind-mount warning.
@@ -241,16 +255,103 @@ func pollStatus(s Session) tea.Cmd {
 }
 
 func fetchLogs(s Session, c dockerapi.Container) tea.Cmd {
+	return fetchLogsByID(s, c.ID)
+}
+
+func fetchLogsByID(s Session, id string) tea.Cmd {
 	return func() tea.Msg {
 		client := dockerapi.New(s.DockerAddr)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		body, err := client.Logs(ctx, c.ID, 200)
+		body, err := client.Logs(ctx, id, 400)
 		if err != nil {
 			body = "failed to fetch logs: " + err.Error()
 		}
-		return logsMsg{id: c.ID, body: stripANSI(body)}
+		return logsMsg{id: id, body: stripANSI(body)}
 	}
+}
+
+// commonCommands seed tab-completion alongside the project's own history and
+// saved commands — the things people actually run against a Testcontainers
+// environment, so the very first Tab has something useful to offer even before
+// any history exists.
+var commonCommands = []string{
+	"mvn verify", "mvn test", "mvn clean verify",
+	"gradle test", "gradle build", "gradle check",
+	"pytest", "pytest -v", "go test ./...", "npm test", "npm run test",
+	"docker ps", "docker images", "docker compose up -d", "docker compose logs -f",
+	"docker version", "docker info",
+}
+
+// autocomplete completes the input against history + saved + common commands.
+// The first Tab from a given prefix builds the candidate set; each further Tab
+// cycles through it. Reset (acMatches=nil) happens on any live edit.
+func (m *model) autocomplete() {
+	prefix := m.input.Value()
+	if strings.TrimSpace(prefix) == "" {
+		return
+	}
+	if m.acMatches == nil {
+		lower := strings.ToLower(prefix)
+		seen := map[string]bool{}
+		var cand []string
+		add := func(list []string) {
+			for _, c := range list {
+				if c != "" && c != prefix && strings.HasPrefix(strings.ToLower(c), lower) && !seen[c] {
+					seen[c] = true
+					cand = append(cand, c)
+				}
+			}
+		}
+		add(m.sess.Commands.History(m.sess.ProjectDir))
+		add(m.sess.Commands.Saved(m.sess.ProjectDir))
+		add(commonCommands)
+		if len(cand) == 0 {
+			return
+		}
+		m.acMatches = cand
+		m.acIdx = 0
+	} else {
+		m.acIdx = (m.acIdx + 1) % len(m.acMatches)
+	}
+	m.input.SetValue(m.acMatches[m.acIdx])
+	m.input.CursorEnd()
+}
+
+// historyBack steps to an older command (↑). histIdx == -1 means we're editing
+// the live input, whose text is stashed in histDraft so ↓ can restore it.
+func (m *model) historyBack() {
+	hist := m.sess.Commands.History(m.sess.ProjectDir)
+	if len(hist) == 0 {
+		return
+	}
+	switch {
+	case m.histIdx == -1:
+		m.histDraft = m.input.Value()
+		m.histIdx = 0
+	case m.histIdx < len(hist)-1:
+		m.histIdx++
+	default:
+		return // already at the oldest
+	}
+	m.input.SetValue(hist[m.histIdx])
+	m.input.CursorEnd()
+}
+
+// historyForward steps back toward the live input (↓).
+func (m *model) historyForward() {
+	if m.histIdx == -1 {
+		return
+	}
+	hist := m.sess.Commands.History(m.sess.ProjectDir)
+	if m.histIdx > 0 {
+		m.histIdx--
+		m.input.SetValue(hist[m.histIdx])
+	} else {
+		m.histIdx = -1
+		m.input.SetValue(m.histDraft)
+	}
+	m.input.CursorEnd()
 }
 
 func runShellCmd(sess Session, cmdline string) tea.Cmd {
@@ -292,6 +393,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ticks%30 == 0 {
 			cmds = append(cmds, pollStatus(m.sess))
 		}
+		// Tail-follow: while the logs overlay is open, keep pulling the
+		// container's logs so they stream in.
+		if m.overlay == overlayLogs && m.logsFollow && m.logsID != "" {
+			cmds = append(cmds, fetchLogsByID(m.sess, m.logsID))
+		}
 		return m, tea.Batch(cmds...)
 
 	case containersMsg:
@@ -313,13 +419,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case logsMsg:
+		// Ignore a stale follow-refresh for a container we're no longer viewing.
+		if m.overlay == overlayLogs && m.logsID != "" && msg.id != m.logsID {
+			return m, nil
+		}
 		m.logsBody = msg.body
 		if strings.TrimSpace(m.logsBody) == "" {
 			m.logsBody = dimStyle.Render("(no output)")
 		}
+		wasFollowing := m.overlay == overlayLogs && m.logsFollow
 		m.overlay = overlayLogs
+		m.logsID = msg.id
 		m.vp.SetContent(m.logsBody)
-		m.vp.GotoTop()
+		// On the first open, start at the top; while following, ride the bottom
+		// like `docker logs -f`.
+		if wasFollowing {
+			m.vp.GotoBottom()
+		} else {
+			m.logsFollow = true
+			m.vp.GotoBottom()
+		}
 		return m, nil
 
 	case cmdDoneMsg:
@@ -373,6 +492,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay == overlayLogs {
 		if msg.Type == tea.KeyEsc {
 			m.overlay = overlayNone
+			m.logsFollow = false
+			m.logsID = ""
 			m.syncViewport()
 			return m, nil
 		}
@@ -382,7 +503,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.Type {
-	case tea.KeyTab:
+	case tea.KeyShiftTab:
+		// Switch panes (input ↔ container sidebar). Tab is reserved for
+		// autocomplete now, so pane-switching moved here.
 		if m.focus == focusInput {
 			m.focus = focusSidebar
 			m.input.Blur()
@@ -402,6 +525,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyCtrlL:
 		if c, ok := m.selectedContainer(); ok {
+			m.logsID = c.ID
+			m.logsFollow = true
 			return m, fetchLogs(m.sess, c)
 		}
 		return m, nil
@@ -419,13 +544,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selected = min(len(m.containers)-1, m.selected+1)
 		case tea.KeyEnter:
 			if c, ok := m.selectedContainer(); ok {
+				m.logsID = c.ID
+				m.logsFollow = true
 				return m, fetchLogs(m.sess, c)
 			}
 		}
 		return m, nil
 	}
 
-	// Input focus: run commands.
+	// Input focus.
+	// Tab cycles autocomplete candidates; ↑/↓ walk command history.
+	switch msg.Type {
+	case tea.KeyTab:
+		m.autocomplete()
+		return m, nil
+	case tea.KeyUp:
+		m.historyBack()
+		return m, nil
+	case tea.KeyDown:
+		m.historyForward()
+		return m, nil
+	}
+
 	if msg.Type == tea.KeyEnter {
 		if m.running {
 			return m, nil
@@ -447,11 +587,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sess.Commands.AddHistory(m.sess.ProjectDir, cmdline)
 		m.input.Blur()
 		m.running = true
+		m.histIdx = -1
+		m.acMatches = nil
 		m.lines = append(m.lines, promptGlyph.Render("❯")+" "+textStyle.Render(cmdline))
 		m.syncViewport()
 		return m, runShellCmd(m.sess, cmdline)
 	}
 
+	// Any other key is live editing — cancel history navigation and reset the
+	// autocomplete cycle so the next Tab recomputes from the new text.
+	m.histIdx = -1
+	m.acMatches = nil
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
@@ -673,7 +819,11 @@ func (m model) mainPane() string {
 	}
 	title := ""
 	if m.overlay == overlayLogs {
-		title = amberStyle.Render(tracked("logs")) + dimStyle.Render("  esc to close") + "\n"
+		follow := ""
+		if m.logsFollow {
+			follow = greenStyle.Render(" ● live") + dimStyle.Render(" (following)")
+		}
+		title = amberStyle.Render(tracked("logs")) + follow + dimStyle.Render("  esc to close") + "\n"
 	}
 	return lipgloss.NewStyle().Width(m.vp.Width).Height(m.vp.Height).Render(title + m.vp.View())
 }
@@ -705,7 +855,7 @@ func (m model) View() string {
 	if m.running {
 		statusLine = amberStyle.Render("running…")
 	} else if m.focus == focusSidebar {
-		statusLine = dimStyle.Render("containers focused — ↑↓ select · enter/^l logs · ^y copy port · tab back to input")
+		statusLine = dimStyle.Render("containers focused — ↑↓ select · enter/^l logs · ^y copy port · ⇧tab back to input")
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
@@ -719,7 +869,7 @@ func (m model) View() string {
 		),
 		hairline,
 		statusLine,
-		dimStyle.Render("Tab focus · ^l logs · ^y copy port · ^r commands · ^s save · exit"),
+		dimStyle.Render("↑ history · Tab complete · ⇧Tab panes · ^l logs · ^y copy port · ^r commands · exit"),
 	)
 
 	return lipgloss.NewStyle().
