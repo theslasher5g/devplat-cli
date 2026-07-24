@@ -145,6 +145,14 @@ func (c *Client) ReleaseEnvironment(id string) error {
 	return c.do(http.MethodDelete, "/environments/"+id, nil, nil)
 }
 
+// CheckAuth verifies the configured token is accepted by the control plane
+// without creating anything: it lists environments (GET /environments), a
+// cheap, read-only, authenticated call. A nil error means the token works; a
+// non-nil error on an otherwise-reachable API means it was rejected.
+func (c *Client) CheckAuth() error {
+	return c.do(http.MethodGet, "/environments", nil, nil)
+}
+
 // PlatformStatus fetches the public status summary for the TUI header. Returns
 // a zero value (and no error) treated by callers as "unknown" on failure.
 func (c *Client) PlatformStatus() (*PlatformStatus, error) {

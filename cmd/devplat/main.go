@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"github.com/theslasher5g/devplat-cli/internal/tui"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
 	"github.com/theslasher5g/devplat-cli/internal/ui"
+	"github.com/theslasher5g/devplat-cli/internal/versioncheck"
 )
 
 var version = "dev" // set via -ldflags at release build time
@@ -53,6 +55,10 @@ func main() {
 		runLogin(os.Args[2:])
 	case "logout":
 		runLogout(os.Args[2:])
+	case "doctor":
+		runDoctor(os.Args[2:])
+	case "upgrade", "update":
+		runUpgrade(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("devplat " + version)
 	case "help", "--help", "-h":
@@ -85,6 +91,15 @@ Usage:
       the environment is released when it finishes. Either way the
       environment is torn down on exit.
 
+  devplat doctor
+      Run a quick self-check: CLI version and available updates, which token
+      is in use and where it came from, whether the control plane is
+      reachable, and whether that token is accepted. Changes nothing.
+
+  devplat upgrade
+      Update the CLI to the latest published release using the official
+      installer (prints the command on Windows).
+
   devplat version
       Print the CLI version.
 
@@ -92,6 +107,126 @@ Token resolution: --token flag, then the DEVPLAT_TOKEN environment
 variable, then the token saved by 'devplat login'. Control-plane URL
 defaults to https://api.devplat.ch, override with --api-url or
 DEVPLAT_API_URL (mainly for local development).`)
+}
+
+// maybeVersionHint prints a one-line notice when a newer CLI has been
+// published. Interactive sessions only: a CI run (--exec) has no one reading
+// the output and shouldn't pay the lookup's latency, and an unversioned `dev`
+// build never nags. Time-boxed and best-effort — a slow or unreachable release
+// host just means no hint.
+func maybeVersionHint(execCmd string) {
+	if execCmd != "" || version == "dev" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if latest := versioncheck.Latest(ctx); versioncheck.Outdated(version, latest) {
+		ui.Note("a newer devplat is available: %s (you have %s) — run 'devplat upgrade'", latest, version)
+	}
+}
+
+func maskToken(t string) string {
+	if len(t) <= 10 {
+		return "…"
+	}
+	return t[:8] + "…" + t[len(t)-2:]
+}
+
+func tokenSource(tokenFlag string) string {
+	switch {
+	case tokenFlag != "":
+		return "--token flag"
+	case os.Getenv("DEVPLAT_TOKEN") != "":
+		return "DEVPLAT_TOKEN env"
+	default:
+		return "stored login"
+	}
+}
+
+// runDoctor is a read-only self-check: version/update, credentials, control-
+// plane reachability, and token acceptance. It creates nothing (no VM), so it's
+// safe to run anytime — the first thing to reach for when `connect` misbehaves.
+func runDoctor(args []string) {
+	tokenFlag, apiURLFlag, _ := parseConnFlags(args)
+	cfg := config.Resolve(tokenFlag, apiURLFlag)
+
+	ui.Banner(version)
+	fmt.Println()
+
+	// 1. CLI version + update check.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	latest := versioncheck.Latest(ctx)
+	cancel()
+	switch {
+	case latest == "":
+		ui.Line(true, "CLI "+version+" — couldn't reach the release host to check for updates")
+	case versioncheck.Outdated(version, latest):
+		ui.Line(false, fmt.Sprintf("CLI %s — update available: %s (run 'devplat upgrade')", version, latest))
+	default:
+		ui.Line(true, fmt.Sprintf("CLI %s — up to date", version))
+	}
+
+	// 2. Credentials.
+	if cfg.Token == "" {
+		ui.Line(false, "no API token — run 'devplat login', pass --token, or set DEVPLAT_TOKEN")
+	} else {
+		ui.Line(true, fmt.Sprintf("token present (%s), from %s", maskToken(cfg.Token), tokenSource(tokenFlag)))
+	}
+
+	// 3. Control-plane reachability.
+	client := apiclient.New(cfg.APIURL, cfg.Token, version)
+	reachable := false
+	if st, err := client.PlatformStatus(); err != nil {
+		ui.Line(false, fmt.Sprintf("control plane %s unreachable (%s)", cfg.APIURL, err.Error()))
+	} else {
+		reachable = true
+		ui.Line(true, fmt.Sprintf("control plane %s reachable — platform status: %s", cfg.APIURL, st.Overall.Label))
+	}
+
+	// 4. Token acceptance (only worth testing with a token and a reachable API).
+	if cfg.Token != "" && reachable {
+		if err := client.CheckAuth(); err != nil {
+			ui.Line(false, "token was rejected by the control plane — it may be revoked; run 'devplat login' again")
+		} else {
+			ui.Line(true, "token accepted by the control plane")
+		}
+	}
+
+	fmt.Println()
+	ui.Note("devplat replaces your local Docker daemon — you do not need Docker installed on this machine.")
+}
+
+// runUpgrade updates the CLI to the latest release via the official installer.
+// The user asked for it explicitly, so running the same one-liner the Download
+// page documents is the expected action; on Windows we print the PowerShell
+// command instead of shelling into a foreign shell.
+func runUpgrade(_ []string) {
+	ui.Banner(version)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	latest := versioncheck.Latest(ctx)
+	cancel()
+	switch {
+	case latest == "":
+		ui.Note("couldn't reach the release host to check the latest version — proceeding with the installer anyway.")
+	case version != "dev" && !versioncheck.Outdated(version, latest):
+		ui.Line(true, fmt.Sprintf("already on the latest version (%s)", version))
+		return
+	default:
+		ui.Line(false, fmt.Sprintf("update available: %s → %s", version, latest))
+	}
+
+	if runtime.GOOS == "windows" {
+		fmt.Println("\nRun this in PowerShell to upgrade:\n  irm https://get.devplat.ch/install.ps1 | iex")
+		return
+	}
+	fmt.Println("\nUpgrading via the official installer:\n  $ curl -fsSL https://get.devplat.ch | sh")
+	cmd := exec.Command("sh", "-c", "curl -fsSL https://get.devplat.ch | sh")
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := cmd.Run(); err != nil {
+		ui.Fatal("upgrade failed: %s", err.Error())
+		os.Exit(1)
+	}
+	ui.Line(true, "upgrade complete — run 'devplat version' to confirm")
 }
 
 // parseConnFlags pulls --token/--api-url/--exec out of an arg slice, shared by
@@ -267,6 +402,7 @@ func runConnect(args []string) {
 	client := apiclient.New(cfg.APIURL, cfg.Token, version)
 
 	ui.Banner(version)
+	maybeVersionHint(execCmd)
 
 	spin := ui.NewSpinner()
 	spin.Start("requesting an environment…")

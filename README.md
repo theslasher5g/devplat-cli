@@ -60,9 +60,20 @@ control plane over HTTPS/WSS only.
 ## Usage
 
 ```
-devplat connect [--token TOKEN] [--api-url URL]
+devplat login   [--token TOKEN] [--api-url URL]
+devplat connect [--token TOKEN] [--api-url URL] [--exec "CMD"]
+devplat doctor  [--token TOKEN] [--api-url URL]
+devplat upgrade
+devplat logout
 devplat version
 ```
+
+`devplat doctor` runs a read-only self-check — CLI version and available
+updates, which token is in use and where it came from, control-plane
+reachability, and whether that token is accepted — and creates nothing.
+`devplat upgrade` pulls the latest release via the official installer.
+Interactive `devplat connect` also prints a one-line notice when a newer
+CLI is available (CI runs with `--exec` stay silent).
 
 Token resolution: `--token` flag, then `DEVPLAT_TOKEN` env var. Create a
 scoped `ci:run` token in the dashboard under Tokens — the same flow the
