@@ -149,7 +149,7 @@ func runLogin(args []string) {
 	}
 
 	// Device flow: start a request, show the code, poll until approved.
-	client := apiclient.New(apiURL, "")
+	client := apiclient.New(apiURL, "", version)
 	da, err := client.StartDeviceAuth()
 	if err != nil {
 		ui.Fatal("could not start login: %s", err.Error())
@@ -230,7 +230,7 @@ func runLogout(args []string) {
 	if apiURL == "" {
 		apiURL = config.DefaultAPIURL
 	}
-	if err := apiclient.New(apiURL, stored.Token).RevokeToken(); err != nil {
+	if err := apiclient.New(apiURL, stored.Token, version).RevokeToken(); err != nil {
 		ui.Note("(could not reach the server to revoke the token: %s — removing it locally anyway)", err.Error())
 	}
 	if err := credentials.Delete(); err != nil {
@@ -264,7 +264,7 @@ func runConnect(args []string) {
 		fmt.Fprintln(os.Stderr, "devplat: no API token — run 'devplat login', pass --token, or set DEVPLAT_TOKEN")
 		os.Exit(1)
 	}
-	client := apiclient.New(cfg.APIURL, cfg.Token)
+	client := apiclient.New(cfg.APIURL, cfg.Token, version)
 
 	ui.Banner(version)
 

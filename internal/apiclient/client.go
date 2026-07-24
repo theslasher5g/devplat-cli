@@ -18,13 +18,19 @@ import (
 type Client struct {
 	BaseURL string
 	Token   string
+	// Version is the CLI's own version (set via -ldflags at release build
+	// time). It's advertised on authenticated requests via X-Devplat-CLI-Version
+	// so the control plane can tell a team when their CLI is behind the latest
+	// release. Empty or "dev" (unversioned local build) is not sent.
+	Version string
 	HTTP    *http.Client
 }
 
-func New(baseURL, token string) *Client {
+func New(baseURL, token, version string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
+		Version: version,
 		// POST /environments can legitimately take a while: the agent's own
 		// boot-readiness wait is up to 30s per host, wrapped in a 90s agent
 		// handler timeout, wrapped in the scheduler's 110s per-host HTTP
@@ -84,6 +90,9 @@ func (c *Client) do(method, path string, body any, out any) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if c.Version != "" && c.Version != "dev" {
+		req.Header.Set("X-Devplat-CLI-Version", c.Version)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
