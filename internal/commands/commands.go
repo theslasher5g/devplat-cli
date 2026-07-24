@@ -66,9 +66,12 @@ func (s *Store) persist() {
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(s.path), 0o755)
+	// 0600 / 0700, not world-readable: command history can contain secrets a
+	// user typed inline (e.g. `TOKEN=… mvn verify`), same reasoning as a shell
+	// history file — don't expose it to other local users.
+	_ = os.MkdirAll(filepath.Dir(s.path), 0o700)
 	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, raw, 0o644) == nil {
+	if os.WriteFile(tmp, raw, 0o600) == nil {
 		_ = os.Rename(tmp, s.path)
 	}
 }
