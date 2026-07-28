@@ -22,7 +22,7 @@ func newTestModel(t *testing.T) model {
 	ti.Focus()
 	sess := Session{
 		Version: "1.0", RequestID: "req_abcdef1234", ProjectDir: t.TempDir(),
-		Commands: commands.Load(),
+		Commands:   commands.Load(),
 		BindMounts: []compose.BindMount{{Service: "db", Source: "./data", Target: "/var/lib/postgresql"}},
 	}
 	m := model{sess: sess, vp: viewport.New(80, 20), input: ti, lines: welcomeLines(sess), histIdx: -1}
@@ -45,19 +45,22 @@ func TestView_RendersAllPanels(t *testing.T) {
 	m = step(t, m, envMsg{env: &apiclient.Environment{
 		Vcpu: 2, RamMb: 4096, Region: "CH-BSL-1",
 		ExpiresAt: time.Now().Add(30 * time.Minute).Format(time.RFC3339),
-		Usage:     struct{ Running int `json:"running"`; Limit int `json:"limit"` }{Running: 1, Limit: 2},
+		Usage: struct {
+			Running int `json:"running"`
+			Limit   int `json:"limit"`
+		}{Running: 1, Limit: 2},
 	}})
 	m = step(t, m, statusMsg{status: "operational", label: "All systems operational"})
 
 	view := m.View()
 	for _, want := range []string{
-		"req_abcd",                    // short env id
-		"postgres:16",                 // container image (#1)
-		"localhost:54321",             // mirrored port (#1)
-		"2 vCPU", "4 GB", "CH-BSL-1",  // resource HUD (#2)
-		"TTL",                          // TTL countdown (#2)
-		"1/2 envs",                     // parallel usage (#7)
-		"All systems operational",      // platform status (#6)
+		"req_abcd",                   // short env id
+		"postgres:16",                // container image (#1)
+		"localhost:54321",            // mirrored port (#1)
+		"2 vCPU", "4 GB", "CH-BSL-1", // resource HUD (#2)
+		"TTL",                     // TTL countdown (#2)
+		"1/2 envs",                // parallel usage (#7)
+		"All systems operational", // platform status (#6)
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q", want)
