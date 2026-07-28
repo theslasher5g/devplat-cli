@@ -57,6 +57,10 @@ go build ./cmd/devplat
 Requires Go 1.23+. No other local dependencies — this binary talks to the
 control plane over HTTPS/WSS only.
 
+```
+go test ./...
+```
+
 ## Usage
 
 ```
@@ -75,19 +79,38 @@ reachability, and whether that token is accepted — and creates nothing.
 Interactive `devplat connect` also prints a one-line notice when a newer
 CLI is available (CI runs with `--exec` stay silent).
 
-Token resolution: `--token` flag, then `DEVPLAT_TOKEN` env var. Create a
-scoped `ci:run` token in the dashboard under Tokens — the same flow the
-Download page's "CI runners" tab documents. `--api-url` (or
-`DEVPLAT_API_URL`) overrides the control-plane URL; defaults to
+Token resolution: `--token` flag, then `DEVPLAT_TOKEN` env var, then the token
+saved by `devplat login`. Create a scoped `ci:run` token in the dashboard under
+Tokens — the same flow the Download page's "CI runners" tab documents.
+`--api-url` (or `DEVPLAT_API_URL`) overrides the control-plane URL; defaults to
 `https://api.devplat.ch`. Mainly useful for local development against a
 non-production backend.
 
-## Status
+`devplat login` with no flags runs the browser device-code flow: it prints a
+short code, you approve it in the dashboard, and the resulting token is saved
+to your user config dir. `devplat logout` revokes it server-side and removes
+it locally, so a logged-out machine can't keep starting environments.
 
-v1: token-auth `connect` only. `devplat login` (browser device-code flow +
-OS keychain storage, for interactive local use without a pre-issued token)
-is not yet implemented — token auth via `--token`/`DEVPLAT_TOKEN` covers CI
-and local dev today.
+## Account restrictions the CLI reports
+
+The control plane can reject a request for reasons that have nothing to do with
+capacity, and a raw JSON error in a CI log at 3am is useless. `internal/apiclient/errors.go`
+maps each code to advice that names the command to run:
+
+| Code | What it means |
+|---|---|
+| `api_token_expired` | The token had an expiry date and passed it. Create a new one, then `devplat login --token <new>`. |
+| `invalid_api_token` | Revoked or never valid. |
+| `ip_not_allowed` | The token has an IP allowlist and this address isn't in it — CI runners usually egress from a different range than a laptop. |
+| `two_factor_required` | The team requires 2FA and this account hasn't enrolled. |
+| `seat_limit_reached` | The team's plan has no seats left. |
+| `session_revoked` | The session was signed out elsewhere. |
+| `email_not_verified` | The account's address hasn't been confirmed. |
+
+Codes not in that table fall through to the server's own wording, so a new
+server-side error is never swallowed. `devplat doctor` surfaces the same
+diagnosis without creating anything — it's the first thing to run when a
+previously working token stops working.
 
 ## Distribution
 
