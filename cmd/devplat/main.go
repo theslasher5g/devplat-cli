@@ -318,14 +318,19 @@ func runLogin(args []string) {
 		res, err := client.PollDeviceToken(da.DeviceCode)
 		if err != nil {
 			// Terminal server states end the loop; anything else (a transient
-			// network blip) is retried until the deadline.
-			switch err.Error() {
-			case "expired_token":
-				spin.Stop(false, "login expired — run 'devplat login' again")
-				os.Exit(1)
-			case "invalid_device_code", "already_completed":
-				spin.Stop(false, "login could not be completed — run 'devplat login' again")
-				os.Exit(1)
+			// network blip) is retried until the deadline. Match on the error
+			// CODE, not the rendered message — the latter is human-facing prose
+			// and changing its wording must never silently break this loop.
+			var apiErr *apiclient.APIError
+			if errors.As(err, &apiErr) {
+				switch apiErr.Code {
+				case "expired_token":
+					spin.Stop(false, "login expired — run 'devplat login' again")
+					os.Exit(1)
+				case "invalid_device_code", "already_completed":
+					spin.Stop(false, "login could not be completed — run 'devplat login' again")
+					os.Exit(1)
+				}
 			}
 			continue
 		}

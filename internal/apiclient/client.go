@@ -108,13 +108,9 @@ func (c *Client) do(method, path string, body any, out any) error {
 	if res.StatusCode >= 300 {
 		var apiErr apiError
 		_ = json.Unmarshal(raw, &apiErr)
-		if apiErr.Detail != "" {
-			return fmt.Errorf("%s (%s)", apiErr.Detail, apiErr.Error)
-		}
-		if apiErr.Error != "" {
-			return fmt.Errorf("%s: %s", path, apiErr.Error)
-		}
-		return fmt.Errorf("%s: unexpected status %d", path, res.StatusCode)
+		// Structured so callers can branch on the code, and so the printed
+		// message is advice rather than a raw server string. See errors.go.
+		return &APIError{Status: res.StatusCode, Code: apiErr.Error, Detail: apiErr.Detail}
 	}
 	if out != nil && len(raw) > 0 {
 		return json.Unmarshal(raw, out)
@@ -237,10 +233,7 @@ func (c *Client) doNoAuth(method, path string, body any, out any) error {
 	if res.StatusCode >= 300 {
 		var apiErr apiError
 		_ = json.Unmarshal(raw, &apiErr)
-		if apiErr.Error != "" {
-			return fmt.Errorf("%s", apiErr.Error)
-		}
-		return fmt.Errorf("%s: unexpected status %d", path, res.StatusCode)
+		return &APIError{Status: res.StatusCode, Code: apiErr.Error, Detail: apiErr.Detail}
 	}
 	if out != nil && len(raw) > 0 {
 		return json.Unmarshal(raw, out)
