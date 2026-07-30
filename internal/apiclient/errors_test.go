@@ -63,7 +63,7 @@ func TestExpiredPredicate(t *testing.T) {
 func TestKnownCodesAllHaveHints(t *testing.T) {
 	known := []string{
 		"api_token_expired", "invalid_api_token", "ip_not_allowed",
-		"two_factor_required", "seat_limit_reached", "session_revoked",
+		"two_factor_required", "seat_limit_reached", "plan_required", "session_revoked",
 		"no_team", "rate_limited", "email_not_verified",
 	}
 	for _, code := range known {

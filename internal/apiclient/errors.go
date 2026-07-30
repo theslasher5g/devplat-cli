@@ -60,6 +60,15 @@ func hintFor(code string) string {
 		return "your team has no seats left on its current plan\n" +
 			"  Upgrade at https://devplat.ch/app/billing or remove an unused member."
 
+	// Distinct from a capacity wait on purpose. This team's parallelism cap is
+	// zero — a lapsed free trial, or a team created after the account's one
+	// trial was already used — so the request would otherwise sit in "queued,
+	// waiting for capacity…" forever, waiting on a limit that can never be met.
+	// That reads as our shortage rather than their billing.
+	case "plan_required":
+		return "this team has no active plan, so it can't start environments\n" +
+			"  Choose a plan at https://devplat.ch/app/billing. The free trial is once per account."
+
 	case "session_revoked":
 		return "this session was signed out\n" +
 			"  Run 'devplat login' to sign in again."
