@@ -45,17 +45,26 @@ PUBKEY=$(cat pub.pem)
 mkdir repo
 tar -C "$REPO" --exclude=./dist --exclude=./.git -cf - . | tar -C repo -xf -
 cd repo
-python3 - "$PUBKEY" <<'PY'
-import sys, re
-pub = sys.argv[1].strip()
-for path, pattern in [
-    ('internal/release/release.go', r'-----BEGIN PUBLIC KEY-----\nPLACEHOLDER-NO-RELEASE-KEY-CONFIGURED\n-----END PUBLIC KEY-----'),
-    ('install.sh', r'-----BEGIN PUBLIC KEY-----\nPLACEHOLDER-NO-RELEASE-KEY-CONFIGURED\n-----END PUBLIC KEY-----'),
-    ('install.ps1', r'-----BEGIN PUBLIC KEY-----\nPLACEHOLDER-NO-RELEASE-KEY-CONFIGURED\n-----END PUBLIC KEY-----'),
-]:
-    s = open(path).read()
-    s = re.sub(pattern, pub, s)
-    open(path, 'w').write(s)
+PUBKEY="$PUBKEY" python3 <<'PY'
+import os, re, sys
+
+# Replace whatever key block is there, not the placeholder specifically.
+#
+# The first version matched the placeholder text. That works exactly once: the
+# moment a real key is configured, the substitution matches nothing, the
+# installers keep the production key while the release is signed with this
+# throwaway one, and every run fails. Since a configured tree is the permanent
+# state after scripts/gen-release-key.sh, that would have left CI red forever
+# on the first repo where signing was actually switched on — the opposite of
+# what this check is for.
+pub = os.environ["PUBKEY"].strip()
+block = re.compile(r"-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----", re.S)
+for path in ("internal/release/release.go", "install.sh", "install.ps1"):
+    text = open(path).read()
+    patched, n = block.subn(pub, text)
+    if n != 1:
+        sys.exit(f"expected exactly one public key block in {path}, found {n}")
+    open(path, "w").write(patched)
 PY
 
 # The consistency test must still pass once a real key is in all three places —

@@ -78,3 +78,12 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: ./scripts/verify-signing.sh
+      # Exercises gen-release-key.sh against a throwaway copy of the tree, which
+      # is the only way to test a script whose job is to write a private key and
+      # rewire three source files. It caught two real defects: verify-signing.sh
+      # only worked on an unconfigured tree (so CI would have gone permanently
+      # red the day signing was switched on), and the "already configured" guard
+      # never fired, so on a tree whose key had been moved to a password manager
+      # the script would have overwritten a live key without the rotation
+      # warning.
+      - run: ./scripts/verify-keysetup.sh
