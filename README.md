@@ -127,6 +127,40 @@ below, not a rewrite.
 # -> dist/version.txt (just "v0.4.2")
 ```
 
+**Release signing.** `checksums.txt` on its own proves only that a download
+wasn't truncated: it sits on the same host as the archives it describes, so
+whoever can replace a binary can rewrite the checksum beside it. Every release
+is therefore signed with an Ed25519 key that never touches the release host.
+
+```bash
+# once, on a machine you control — never on the VPS, never in CI:
+./scripts/gen-release-key.sh
+# then paste the public key into all three of:
+#   internal/release/release.go  (PublicKeyPEM)
+#   install.sh                   (RELEASE_PUBKEY)
+#   install.ps1                  ($ReleasePubKey)
+# internal/release/pubkey_consistency_test.go fails the build if they drift.
+
+DEVPLAT_RELEASE_KEY=~/devplat-release-key.pem ./scripts/build-release.sh v0.4.2
+```
+
+`build-release.sh` refuses to package an unsigned release unless
+`DEVPLAT_ALLOW_UNSIGNED=1`, and verifies the signature it just wrote before
+finishing — publishing one nobody can check would fail closed for every user at
+once.
+
+Who checks what:
+
+| path | signature | notes |
+|---|---|---|
+| `install.sh` | yes, via `openssl` | refuses to install if the signature is missing or wrong |
+| `devplat upgrade` | yes, in Go | no external tool needed; downloads and replaces the binary itself |
+| `install.ps1` | only if `openssl` is on PATH | Windows PowerShell 5.1 has no Ed25519; it says so and points at `devplat upgrade` |
+
+A *missing* signature is a hard failure, not a reason to skip the check — if it
+were skippable, an attacker holding the host would simply delete the file.
+`checksums.txt.sig` must therefore be published alongside `checksums.txt`.
+
 **Publishing to get.devplat.ch** (a static file server — see
 `deploy/docker-compose.get.yml` + `deploy/nginx.get.conf`, same
 paste-into-the-VPS's-compose-file convention as `devplat-backend`'s and
@@ -134,8 +168,9 @@ paste-into-the-VPS's-compose-file convention as `devplat-backend`'s and
 ```bash
 # on the VPS, /opt/devplat/get/public is the volume mount target
 mkdir -p /opt/devplat/get/public/v0.4.2
-cp dist/v0.4.2/* /opt/devplat/get/public/v0.4.2/
+cp dist/v0.4.2/* /opt/devplat/get/public/v0.4.2/   # includes checksums.txt.sig
 cp dist/version.txt /opt/devplat/get/public/version.txt
+cp dist/devplat-release.pub.pem /opt/devplat/get/public/   # for manual verification
 cp install.sh install.ps1 /opt/devplat/get/public/
 
 # first time only: copy deploy/docker-compose.get.yml's `get:` service
@@ -158,6 +193,7 @@ curl -fsSL https://get.devplat.ch | sh
 irm https://get.devplat.ch/install.ps1 | iex
 ```
 Both scripts resolve `version.txt`, download the matching archive +
-`checksums.txt`, verify the hash, and install onto `PATH` (`/usr/local/bin`
+`checksums.txt` (+ `checksums.txt.sig`), verify the signature and then the
+hash, and install onto `PATH` (`/usr/local/bin`
 on Linux — falls back to `sudo` if that's not writable; `%LOCALAPPDATA%\devplat\bin`
 on Windows, added to the user `PATH`).

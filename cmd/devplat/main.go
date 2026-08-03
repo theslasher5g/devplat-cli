@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -26,6 +27,9 @@ import (
 	"github.com/theslasher5g/devplat-cli/internal/config"
 	"github.com/theslasher5g/devplat-cli/internal/credentials"
 	"github.com/theslasher5g/devplat-cli/internal/portwatch"
+	// Aliased: main.go already has a `release(client, requestID)` helper that
+	// hands an environment back, and the two would shadow each other.
+	relverify "github.com/theslasher5g/devplat-cli/internal/release"
 	"github.com/theslasher5g/devplat-cli/internal/tui"
 	"github.com/theslasher5g/devplat-cli/internal/tunnel"
 	"github.com/theslasher5g/devplat-cli/internal/ui"
@@ -210,10 +214,16 @@ func runDoctor(args []string) {
 	ui.Note("devplat replaces your local Docker daemon — you do not need Docker installed on this machine.")
 }
 
-// runUpgrade updates the CLI to the latest release via the official installer.
-// The user asked for it explicitly, so running the same one-liner the Download
-// page documents is the expected action; on Windows we print the PowerShell
-// command instead of shelling into a foreign shell.
+// runUpgrade replaces this binary with the latest published release.
+//
+// It used to shell out to `curl -fsSL https://get.devplat.ch | sh`, which meant
+// the upgrade path's entire integrity check was "the release host said so".
+// Now the download, the signature check and the replacement all happen here,
+// where crypto/ed25519 is already linked in and no external tool has to be
+// present for the verification to run.
+//
+// Windows still prints the PowerShell one-liner: replacing a running .exe needs
+// a different dance there, and getting that wrong bricks the install.
 func runUpgrade(_ []string) {
 	ui.Banner(version)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -221,7 +231,8 @@ func runUpgrade(_ []string) {
 	cancel()
 	switch {
 	case latest == "":
-		ui.Note("couldn't reach the release host to check the latest version — proceeding with the installer anyway.")
+		ui.Fatal("couldn't reach the release host to find out what the latest version is")
+		os.Exit(1)
 	case version != "dev" && !versioncheck.Outdated(version, latest):
 		ui.Line(true, fmt.Sprintf("already on the latest version (%s)", version))
 		return
@@ -233,14 +244,58 @@ func runUpgrade(_ []string) {
 		fmt.Println("\nRun this in PowerShell to upgrade:\n  irm https://get.devplat.ch/install.ps1 | iex")
 		return
 	}
-	fmt.Println("\nUpgrading via the official installer:\n  $ curl -fsSL https://get.devplat.ch | sh")
-	cmd := exec.Command("sh", "-c", "curl -fsSL https://get.devplat.ch | sh")
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
-	if err := cmd.Run(); err != nil {
-		ui.Fatal("upgrade failed: %s", err.Error())
+
+	if !relverify.IsConfigured() {
+		ui.Line(false, "this build has no release signing key — the download can only be checked "+
+			"against the release host's own checksum, which a compromised host controls too")
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		ui.Fatal("could not work out where this binary lives: %s", err.Error())
 		os.Exit(1)
 	}
-	ui.Line(true, "upgrade complete — run 'devplat version' to confirm")
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		ui.Fatal("could not resolve %s: %s", self, err.Error())
+		os.Exit(1)
+	}
+
+	spin := ui.NewSpinner()
+	spin.Start("downloading and verifying " + latest)
+	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	archive, name, err := relverify.NewDownloader("").FetchVerified(dlCtx, latest)
+	dlCancel()
+	if err != nil {
+		spin.Stop(false, "verification failed")
+		ui.Fatal("%s", err.Error())
+		os.Exit(1)
+	}
+	spin.Stop(true, fmt.Sprintf("%s verified (%d KB)", name, len(archive)/1024))
+
+	// Staged in the destination directory, not /tmp: os.Rename cannot cross a
+	// filesystem boundary, and /tmp is very often a different one. Writing the
+	// replacement next to the original keeps the final step a single atomic
+	// rename, so an interrupted upgrade leaves either the old binary or the new
+	// one — never a half-written file on PATH.
+	dir := filepath.Dir(self)
+	staging, err := os.MkdirTemp(dir, ".devplat-upgrade-")
+	if err != nil {
+		ui.Fatal("cannot write to %s (%s) — try again with sudo", dir, err.Error())
+		os.Exit(1)
+	}
+	defer os.RemoveAll(staging)
+
+	binPath, err := relverify.ExtractBinary(archive, staging)
+	if err != nil {
+		ui.Fatal("%s", err.Error())
+		os.Exit(1)
+	}
+	if err := os.Rename(binPath, self); err != nil {
+		ui.Fatal("could not replace %s: %s — try again with sudo", self, err.Error())
+		os.Exit(1)
+	}
+	ui.Line(true, fmt.Sprintf("upgraded to %s — run 'devplat version' to confirm", latest))
 }
 
 // parseConnFlags pulls --token/--api-url/--exec out of an arg slice, shared by
