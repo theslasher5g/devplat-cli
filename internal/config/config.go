@@ -6,7 +6,11 @@
 package config
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/theslasher5g/devplat-cli/internal/credentials"
 )
@@ -48,4 +52,48 @@ func Resolve(tokenFlag, apiURLFlag string) Config {
 		apiURL = DefaultAPIURL
 	}
 	return Config{APIURL: apiURL, Token: token}
+}
+
+// Validate refuses a control-plane URL that would put the API token on the
+// wire in the clear.
+//
+// The token is a bearer credential: whoever reads it off the network can start
+// environments, read the team's run history and mint nothing further only
+// because tokens cannot mint tokens. Nothing in the CLI checked the scheme, so
+// DEVPLAT_API_URL=http://api.devplat.ch — a plausible typo, a stale snippet
+// copied into a CI file, a downgrade injected upstream — sent that credential
+// over plaintext HTTP and printed nothing at all about it.
+//
+// Loopback is exempt because the help text advertises --api-url for local
+// development, and a plaintext connection that never leaves the machine has no
+// network to be observed on. "localhost" is matched by name as well as by
+// address: it is what a developer actually types, and resolving it here would
+// make the check depend on the machine's DNS.
+func (c Config) Validate() error {
+	u, err := url.Parse(c.APIURL)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%q is not a valid API URL — expected something like https://api.devplat.ch", c.APIURL)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf(
+			"refusing to send your API token in the clear: %s uses http, not https.\n"+
+				"       Anyone on the network path could read the token and use it against your team.\n"+
+				"       Use https://, or point --api-url at localhost for local development.", c.APIURL)
+	default:
+		return fmt.Errorf("unsupported API URL scheme %q in %s — expected https", u.Scheme, c.APIURL)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -173,7 +173,17 @@ func runDoctor(args []string) {
 		ui.Line(true, fmt.Sprintf("token present (%s), from %s", maskToken(cfg.Token), tokenSource(tokenFlag)))
 	}
 
-	// 3. Control-plane reachability.
+	// 3. Control-plane URL. Doctor reports rather than exits — explaining what
+	//    is wrong is its whole job — but it must not then go on to send the
+	//    token to a plaintext endpoint just to see whether it is accepted.
+	//    `secure` gates step 4 for exactly that reason.
+	secure := true
+	if err := cfg.Validate(); err != nil {
+		secure = false
+		ui.Line(false, err.Error())
+	}
+
+	// 4. Control-plane reachability.
 	client := apiclient.New(cfg.APIURL, cfg.Token, version)
 	reachable := false
 	if st, err := client.PlatformStatus(); err != nil {
@@ -183,8 +193,12 @@ func runDoctor(args []string) {
 		ui.Line(true, fmt.Sprintf("control plane %s reachable — platform status: %s", cfg.APIURL, st.Overall.Label))
 	}
 
-	// 4. Token acceptance (only worth testing with a token and a reachable API).
-	if cfg.Token != "" && reachable {
+	// 5. Token acceptance (only worth testing with a token and a reachable API,
+	//    and only over a connection that will not expose it in the process).
+	if cfg.Token != "" && reachable && !secure {
+		ui.Line(false, "skipped the token check — it would have sent your token over the insecure URL above")
+	}
+	if cfg.Token != "" && reachable && secure {
 		if err := client.CheckAuth(); err != nil {
 			ui.Line(false, "token was rejected by the control plane — it may be revoked; run 'devplat login' again")
 		} else {
@@ -263,6 +277,13 @@ func runLogin(args []string) {
 	}
 	if apiURL == "" {
 		apiURL = config.DefaultAPIURL
+	}
+	// Login is the one command that definitely transmits a credential — either
+	// the pasted token, or the device-flow exchange — and it also writes the
+	// URL to disk, so a bad one here poisons every later command silently.
+	if err := (config.Config{APIURL: apiURL}).Validate(); err != nil {
+		ui.Fatal("%s", err.Error())
+		os.Exit(1)
 	}
 
 	ui.Banner(version)
@@ -400,6 +421,13 @@ func runConnect(args []string) {
 	tokenFlag, apiURLFlag, execCmd := parseConnFlags(args)
 
 	cfg := config.Resolve(tokenFlag, apiURLFlag)
+	// Checked before the token is looked at, let alone sent: a plaintext
+	// control-plane URL puts the credential on the wire, and refusing early is
+	// the only point at which that is still preventable.
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "devplat: %s\n", err)
+		os.Exit(1)
+	}
 	if cfg.Token == "" {
 		fmt.Fprintln(os.Stderr, "devplat: no API token — run 'devplat login', pass --token, or set DEVPLAT_TOKEN")
 		os.Exit(1)
