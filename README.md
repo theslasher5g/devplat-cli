@@ -171,7 +171,7 @@ mkdir -p /opt/devplat/get/public/v0.4.2
 cp dist/v0.4.2/* /opt/devplat/get/public/v0.4.2/   # includes checksums.txt.sig
 cp dist/version.txt /opt/devplat/get/public/version.txt
 cp dist/devplat-release.pub.pem /opt/devplat/get/public/   # for manual verification
-cp install.sh install.ps1 /opt/devplat/get/public/
+cp dist/install.sh dist/install.ps1 /opt/devplat/get/public/   # carry the same key as the release
 
 # first time only: copy deploy/docker-compose.get.yml's `get:` service
 # block into /opt/devplat/docker-compose.yml, and

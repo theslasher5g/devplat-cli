@@ -95,6 +95,16 @@ fi
 
 echo "${VERSION}" > "${DIST_DIR}/../version.txt"
 
+# The install scripts ship WITH the release, not separately.
+#
+# What users actually run is the copy sitting on get.devplat.ch, and the key it
+# carries has to be the key that signed the release it fetches. Leaving that to
+# a remembered second copy step is a rotation waiting to go half-done: the repo
+# gets the new key, the published installer keeps the old one, and every user
+# is told a genuine release failed verification. Putting them in dist/ makes the
+# publish step "copy dist/" and removes the chance to forget.
+cp "${REPO_ROOT}/install.sh" "${REPO_ROOT}/install.ps1" "${DIST_DIR}/../"
+
 # Sanity: the key we are about to publish must be the one clients hold. A
 # mismatch here means a rotation went half-done and every verifying client is
 # about to reject a genuine release.

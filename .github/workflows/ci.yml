@@ -60,3 +60,21 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build -o /dev/null ./cmd/devplat
+
+  release-signing:
+    name: release signing chain
+    runs-on: ubuntu-latest
+    # The signature only protects anyone if build-release.sh, install.sh and
+    # internal/release still agree on its format. Those three are touched
+    # rarely and exercised only at release time, which is the worst moment to
+    # find out they have drifted — a mismatch breaks every user's install at
+    # once. This builds a real signed release with a throwaway key, installs
+    # from it over HTTP, and then plays both attacks the signature exists to
+    # stop.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: ./scripts/verify-signing.sh
